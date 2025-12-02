@@ -116,6 +116,8 @@ python test_models.py
 ## Models
 
 ### 1. TF-IDF Recommender (CBF)
+- Uses **Spark MLlib HashingTF and IDF** for scalable TF-IDF computation
+- Can handle millions of articles without memory issues
 - Extracts TF-IDF features from news titles and abstracts
 - Computes cosine similarity between articles
 - Recommends based on content similarity to user history
@@ -156,11 +158,12 @@ python test_models.py
 The system demonstrates Spark optimization in:
 
 1. **Data Loading**: Parallel reading of TSV files
-2. **Preprocessing**: Distributed feature extraction
-3. **ALS Training**: Distributed matrix factorization
-4. **Batch Prediction**: Parallel recommendation generation
+2. **TF-IDF Feature Extraction**: Uses HashingTF and IDF from Spark MLlib for scalable text vectorization
+3. **Preprocessing**: Distributed feature extraction
+4. **ALS Training**: Distributed matrix factorization
+5. **Batch Prediction**: Parallel recommendation generation
 
-Benchmarking compares Spark vs. Pandas performance, showing speedup on larger datasets.
+**Key Advantage**: Spark's HashingTF and IDF keep vectors in Spark, allowing you to featurize millions of articles without crashing RAM. The vectors are only collected to the driver after distributed computation.
 
 ## Configuration
 
@@ -214,5 +217,5 @@ The hybrid approach typically achieves the best performance by:
 - ALS: Collaborative Filtering for Implicit Feedback Datasets
 
 ## License
-
+We used Claude Code in VSCode to assist with coding in this assignment.
 This project is for educational purposes.

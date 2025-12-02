@@ -4,9 +4,10 @@ Handles TF-IDF computation and entity extraction.
 """
 
 from sklearn.feature_extraction.text import TfidfVectorizer
-from pyspark.ml.feature import Tokenizer, HashingTF, IDF
-from pyspark.sql.functions import concat_ws, col, udf
+from pyspark.ml.feature import Tokenizer, HashingTF, IDF, StopWordsRemover
+from pyspark.sql.functions import concat_ws, col, udf, lower, regexp_replace
 from pyspark.sql.types import StringType
+from scipy.sparse import csr_matrix
 import numpy as np
 import pandas as pd
 import json
@@ -55,39 +56,92 @@ class FeatureExtractor:
 
         return tfidf_matrix, self.tfidf_vectorizer.get_feature_names_out(), self.tfidf_vectorizer
 
-    def extract_tfidf_spark(self, news_df, num_features=5000):
+    def extract_tfidf_spark(self, news_spark_df, num_features=5000):
         """
         Extract TF-IDF features using Spark MLlib.
 
         Args:
-            news_df: Spark DataFrame with news data
+            news_spark_df: Spark DataFrame with news data
             num_features: Number of hash features
 
         Returns:
-            Spark DataFrame with TF-IDF vectors
+            tuple: (tfidf_matrix as scipy sparse matrix, news_ids array, tfidf_model)
         """
         # Combine title and abstract
-        news_df = news_df.withColumn(
+        news_df_text = news_spark_df.withColumn(
             'text',
             concat_ws(' ',
                      col('title').cast('string'),
                      col('abstract').cast('string'))
         )
 
+        # Clean text: lowercase and remove URLs/special chars
+        news_df_text = news_df_text.withColumn('text', lower(col('text')))
+        news_df_text = news_df_text.withColumn('text', regexp_replace(col('text'), r'http\S+', ''))
+        news_df_text = news_df_text.withColumn('text', regexp_replace(col('text'), r'[^a-z0-9\s]', ' '))
+
         # Tokenize
-        tokenizer = Tokenizer(inputCol='text', outputCol='words')
-        words_data = tokenizer.transform(news_df)
+        tokenizer = Tokenizer(inputCol='text', outputCol='words_raw')
+        words_data = tokenizer.transform(news_df_text)
+
+        # Remove stop words
+        remover = StopWordsRemover(inputCol='words_raw', outputCol='words')
+        words_data = remover.transform(words_data)
 
         # HashingTF
         hashing_tf = HashingTF(inputCol='words', outputCol='raw_features', numFeatures=num_features)
         featurized_data = hashing_tf.transform(words_data)
 
         # IDF
-        idf = IDF(inputCol='raw_features', outputCol='tfidf_features')
+        idf = IDF(inputCol='raw_features', outputCol='tfidf_features', minDocFreq=2)
         self.tfidf_model = idf.fit(featurized_data)
         tfidf_data = self.tfidf_model.transform(featurized_data)
 
-        return tfidf_data.select('news_id', 'tfidf_features')
+        # Select news_id and tfidf_features and order by news_id for consistency
+        tfidf_result = tfidf_data.select('news_id', 'tfidf_features').orderBy('news_id')
+
+        # Convert to scipy sparse matrix
+        tfidf_matrix, news_ids = self._spark_vectors_to_scipy_sparse(tfidf_result, num_features)
+
+        return tfidf_matrix, news_ids, self.tfidf_model
+
+    def _spark_vectors_to_scipy_sparse(self, spark_df, num_features):
+        """
+        Convert Spark DataFrame with SparseVector column to scipy sparse matrix.
+
+        Args:
+            spark_df: Spark DataFrame with 'news_id' and 'tfidf_features' columns
+            num_features: Number of features (dimension)
+
+        Returns:
+            tuple: (scipy csr_matrix, numpy array of news_ids)
+        """
+        # Collect data from Spark to driver
+        rows_data = spark_df.collect()
+
+        # Extract news IDs
+        news_ids = np.array([row['news_id'] for row in rows_data])
+
+        # Build scipy sparse matrix
+        data_list = []
+        row_indices = []
+        col_indices = []
+
+        for row_idx, row in enumerate(rows_data):
+            vector = row['tfidf_features']
+            # SparseVector has indices and values attributes
+            for idx, value in zip(vector.indices, vector.values):
+                row_indices.append(row_idx)
+                col_indices.append(int(idx))
+                data_list.append(float(value))
+
+        # Create CSR matrix
+        tfidf_matrix = csr_matrix(
+            (data_list, (row_indices, col_indices)),
+            shape=(len(news_ids), num_features)
+        )
+
+        return tfidf_matrix, news_ids
 
     def parse_entities(self, entity_str):
         """
